@@ -1,236 +1,115 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
-import yfinance as yf
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score
+import matplotlib.pyplot as plt
+from datetime import date, timedelta
 
 st.set_page_config(page_title="Stock Predictor", layout="wide")
+st.title("📈 Stock Predictor & Monte Carlo Simulation")
 
-# ---------- Helpers ----------
-@st.cache_data(show_spinner=False)
-def load_data(ticker: str, period: str = "10y") -> pd.DataFrame:
-    try:
-        df = yf.download(ticker.upper(), period=period, auto_adjust=True, progress=False)
-        df = df.dropna()
-        # Flatten MultiIndex columns if present (fixes KeyError bug)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        return df
-    except Exception as e:
-        st.error(f"Could not load data for {ticker}. Error: {e}")
-        return pd.DataFrame()
+# ---------- Ticker selection ----------
+ticker_list = [
+    "AAL","AAPL","ACHC","ADBE","AEHR","AEP","AMD","AMGN","AMTX","AMZN","ARCB","AVGO",
+    "BECN","BIDU","CAAS","CAKE","CASY","CHNR","CHPT","CMCSA","COST","CPRX","CSCO","CTSH",
+    "CZR","DBX","DJCO","DLTR","ETSY","FIZZ","FTNT","GBCI","GEG","GILD","GMAB","GOGO",
+    "GOOGL","GRPN","HAS","HBIO","HTLD","ILMN","INTC","IOSP","JBLU","KALU","KDP","LE","LQDA",
+    "LULU","LYFT","MANH","MAR","MAT","META","MIDD","MNST","MSEX","MSFT","MTCH","MYGN","NCTY",
+    "NTES","NTIC","NVDA","NXPI","ONB","ORLY","OZK","PCAR","PEP","PTON","PYPL","PZZA","QCOM",
+    "REGN","RGLD","ROCK","RTC","SBUX","SEDG","SEIC","SFIX","SFM","SIRI","SKYW","SOHU","SWBI",
+    "TROW","TSLA","TXN","TXRH","ULTA","URBN","USLM","UTSI","VEON","VRA","VRSK","WBA","WDFC",
+    "WEN","YORW","ABBV","ABT","AEO","AFL","ALL","AMC","AMN","ANET","ANF","APAM","APD","APTV",
+    "ASGN","ASH","AWK","AXP","AZO","BA","BABA","BAC","BAM","BAX","BBW","BBY","BCS","BEN","BILL",
+    "BLK","BMY","BNED","BP","BUD","BURL","BWA","BX","C","CAT","CCJ","CL","CLW","CMG","CNC",
+    "CNI","CP","CPB","CRH","CRM","CTVA","CVS","CVX","CYD","D","DAL","DB","DE","DEO","DFS","DG",
+    "DIS","DLR","DOC","DOW","DXC","EDR","EDU","EL","EMN","ENB","ET","EXR","F","FCN","FCX","FE",
+    "FICO","FL","FMC","FTS","GD","GE","GEO","GIS","GM","GMED","GRMN","GS","GSK","H","HD","HES",
+    "HMC","HOG","HRB","HSY","ICE","IMAX","IQV","IRM","JNJ","JPM","K","KEY","KKR","KMI","KMX",
+    "KO","KWR","L","LAC","LAZ","LCII","LMT","LOW","LUV","LVS","M","MA","MCD","MCK","MCO","MET",
+    "MKC","MOV","MRK","MS","MTB","NCLH","NFG","NGS","NKE","NOC","NOV","NTR","NVO","NVS","OKE",
+    "OPY","ORCL","PBH","PCG","PFE","PG","PKX","PLNT","PLOW","PNC","PRU","PSA","PSX","RBA",
+    "RCI","RF","RTX","SAP","SAVE","SCHW","SJW","SNA","SNOW","SO","SONY","SPOT","SRE","SUN",
+    "SYY","T","TAL","TAP","TCS","TEVA","TGT","THS","TJX","TM","TR","TREX","TRP","TSM","TSN",
+    "TU","TWI","TXT","UA","UBER","UBS","UGI","UL","UNFI","UNH","UPS","V","VEEV","VFC","VZ",
+    "WFC","WH","WHD","WMT","WNC","WSM","X","XOM","XRX","YUM","ZTO"
+]
 
-def rsi(series: pd.Series, window: int = 14) -> pd.Series:
-    delta = series.diff()
-    up = delta.clip(lower=0)
-    down = -1 * delta.clip(upper=0)
-    roll_up = up.ewm(alpha=1/window, adjust=False).mean()
-    roll_down = down.ewm(alpha=1/window, adjust=False).mean()
-    rs = roll_up / roll_down
-    return 100 - (100 / (1 + rs))
+ticker = st.selectbox("Select stock ticker:", ticker_list)
 
-def macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
-    ema_fast = series.ewm(span=fast, adjust=False).mean()
-    ema_slow = series.ewm(span=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    hist = macd_line - signal_line
-    return macd_line, signal_line, hist
+# ---------- Monte Carlo settings ----------
+num_simulations = st.slider("Number of simulations:", 1000, 50000, 10000, 1000)
+horizon_days = st.number_input("Prediction horizon (days ahead):", min_value=1, max_value=365, value=30)
 
-def stochastic_k(df: pd.DataFrame, k_window: int = 14) -> pd.Series:
-    low_min = df['Low'].rolling(window=k_window).min()
-    high_max = df['High'].rolling(window=k_window).max()
-    return 100 * (df['Close'] - low_min) / (high_max - low_min)
+if st.button("Run Prediction"):
 
-def bollinger_width(series: pd.Series, window: int = 20, num_std: int = 2) -> pd.Series:
-    ma = series.rolling(window).mean()
-    std = series.rolling(window).std()
-    upper = ma + num_std * std
-    lower = ma - num_std * std
-    return (upper - lower) / ma
-
-def make_features(df: pd.DataFrame) -> pd.DataFrame:
-    data = df.copy()
-    data['Return_1d'] = data['Close'].pct_change()
-    data['SMA_10'] = data['Close'].rolling(10).mean()
-    data['SMA_20'] = data['Close'].rolling(20).mean()
-    data['SMA_50'] = data['Close'].rolling(50).mean()
-    data['EMA_10'] = data['Close'].ewm(span=10, adjust=False).mean()
-    data['EMA_20'] = data['Close'].ewm(span=20, adjust=False).mean()
-    data['RSI_14'] = rsi(data['Close'], 14)
-    macd_line, signal_line, hist = macd(data['Close'])
-    data['MACD'] = macd_line
-    data['MACD_Signal'] = signal_line
-    data['MACD_Hist'] = hist
-    data['Stoch_K'] = stochastic_k(data)
-    data['BB_Width'] = bollinger_width(data['Close'])
-    data['Vol_Change'] = data['Volume'].pct_change()
-    data['Range'] = (data['High'] - data['Low']) / data['Close']
-    data['Momentum_10'] = data['Close'].pct_change(10)
-    data['Momentum_20'] = data['Close'].pct_change(20)
-    data = data.dropna()
-    return data
-
-def label_target(close: pd.Series, horizon: int = 5, up_th: float = 0.01, down_th: float = -0.01) -> pd.Series:
-    future_return = close.shift(-horizon) / close - 1.0
-    y = pd.Series(index=close.index, dtype=int)
-    # Assign Buy/Sell/Hold labels
-    y.loc[future_return > up_th] = 1      # Buy
-    y.loc[future_return < down_th] = -1   # Sell
-    y.loc[(future_return <= up_th) & (future_return >= down_th)] = 0  # Hold
-    return y
-
-def rules_signal(row) -> int:
-    buy_votes = 0
-    sell_votes = 0
-
-    # Moving average crossover
-    if row['SMA_10'] > row['SMA_20'] > row['SMA_50']:
-        buy_votes += 1
-    if row['SMA_10'] < row['SMA_20'] < row['SMA_50']:
-        sell_votes += 1
-
-    # RSI
-    if row['RSI_14'] < 30:
-        buy_votes += 1
-    if row['RSI_14'] > 70:
-        sell_votes += 1
-
-    # MACD
-    if row['MACD'] > row['MACD_Signal'] and row['MACD_Hist'] > 0:
-        buy_votes += 1
-    if row['MACD'] < row['MACD_Signal'] and row['MACD_Hist'] < 0:
-        sell_votes += 1
-
-    if buy_votes > sell_votes:
-        return 1
-    if sell_votes > buy_votes:
-        return -1
-    return 0
-
-def recommendation_text(label: int) -> str:
-    return {1: "BUY", -1: "SELL", 0: "HOLD"}.get(label, "HOLD")
-
-# ---------- UI ----------
-st.title("Any-Ticker Stock Predictor")
-st.caption("Enter a stock ticker. The app trains on past data and gives a Buy, Sell, or Hold suggestion. (Educational only, not financial advice.)")
-
-colA, colB, colC = st.columns([2,1,1])
-with colA:
-    ticker = st.text_input("Ticker", value="AAPL").strip()
-with colB:
-    horizon = st.selectbox("Prediction horizon (trading days ahead)", [1, 3, 5, 10, 20], index=0)
-with colC:
-    period = st.selectbox("History window to pull", ["5y", "10y", "max"], index=1)
-
-if st.button("Run model", type="primary") or ticker:
-    if not ticker:
-        st.warning("Please enter a ticker symbol.")
+    # ---------- Fetch historical data ----------
+    end_date = date.today()
+    start_date = end_date - timedelta(days=365*2)  # 2 years history
+    df = yf.download(ticker, start=start_date, end=end_date)
+    
+    if df.empty:
+        st.error("No data found. Check ticker.")
         st.stop()
+    
+    # ---------- SMA signals ----------
+    df["SMA20"] = df["Close"].rolling(window=20).mean()
+    df["SMA50"] = df["Close"].rolling(window=50).mean()
+    df["Signal"] = 0
+    df.loc[df.index[19]:, "Signal"] = (df["SMA20"].iloc[19:] > df["SMA50"].iloc[19:]).astype(int)
+    df["Position"] = df["Signal"].diff()
 
-    df = load_data(ticker, period=period)
-    if df.empty or len(df) < 250:
-        st.error("Not enough data to train. Try a different ticker or longer period.")
-        st.stop()
+    # Plot price + signals
+    fig, ax = plt.subplots(figsize=(10,5))
+    ax.plot(df.index, df["Close"], label="Close Price", color="blue")
+    ax.plot(df.index, df["SMA20"], label="SMA20", color="green")
+    ax.plot(df.index, df["SMA50"], label="SMA50", color="red")
+    ax.scatter(df[df["Position"]==1].index, df["SMA20"][df["Position"]==1], marker="^", color="g", s=100, label="Buy Signal")
+    ax.scatter(df[df["Position"]==-1].index, df["SMA20"][df["Position"]==-1], marker="v", color="r", s=100, label="Sell Signal")
+    ax.set_title(f"{ticker} Price with SMA Signals")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Price ($)")
+    ax.legend()
+    st.pyplot(fig)
 
-    st.subheader(f"Price chart for {ticker.upper()}")
-    st.line_chart(df['Close'])
-
-    data = make_features(df)
-    y = label_target(data['Close'], horizon=horizon)
-    X = data.drop(columns=['Adj Close'], errors='ignore').copy()
-
-    # Align X and y
-    X = X.loc[y.index]
-    dataset = X.dropna().copy()
-    y = y.loc[dataset.index]
-
-    # Remove last 'horizon' rows since their target is NaN
-    dataset = dataset.iloc[:-horizon, :]
-    y = y.iloc[:-horizon]
-
-    feature_cols = [
-        'Return_1d','SMA_10','SMA_20','SMA_50','EMA_10','EMA_20','RSI_14',
-        'MACD','MACD_Signal','MACD_Hist','Stoch_K','BB_Width','Vol_Change',
-        'Range','Momentum_10','Momentum_20'
-    ]
-    dataset = dataset[feature_cols].replace([np.inf, -np.inf], np.nan).dropna()
-    y = y.loc[dataset.index]
-
-    if dataset.empty or y.empty or len(dataset) < 300:
-        st.error("Not enough clean rows after feature engineering. Try a different ticker or period.")
-        st.stop()
-
-    # Train/test split
-    split_idx = int(len(dataset) * 0.8)
-    X_train, X_test = dataset.iloc[:split_idx], dataset.iloc[split_idx:]
-    y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
-
-    clf = RandomForestClassifier(
-        n_estimators=300,
-        max_depth=6,
-        random_state=42,
-        class_weight="balanced_subsample",
-        n_jobs=-1
-    )
-    clf.fit(X_train, y_train)
-    y_pred = clf.predict(X_test)
-    acc = accuracy_score(y_test, y_pred)
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Model accuracy (last 20%)", f"{acc*100:.1f}%")
-    with col2:
-        st.write("Class balance in test set:")
-        st.write(y_test.value_counts(normalize=True).rename({-1:"SELL",0:"HOLD",1:"BUY"}).to_frame("Proportion"))
-
-    # Latest prediction
-    latest_row = dataset.iloc[[-1]].copy()
-    try:
-        proba = clf.predict_proba(latest_row)[0]
-        class_to_idx = {c:i for i,c in enumerate(clf.classes_)}
-        p_sell = proba[class_to_idx.get(-1, 0)]
-        p_hold = proba[class_to_idx.get(0, 1)]
-        p_buy  = proba[class_to_idx.get(1, 2)]
-    except Exception:
-        p_sell, p_hold, p_buy = 0.33, 0.34, 0.33
-
-    model_label = int(clf.predict(latest_row)[0])
-
-    # Rules-based vote
-    last_feat = data.iloc[-1]
-    rule_label = rules_signal(last_feat)
-
-    # Ensemble
-    ensemble_score = model_label + rule_label
-    if ensemble_score > 0:
-        final_label = 1
-    elif ensemble_score < 0:
-        final_label = -1
+    # Current SMA recommendation
+    latest_signal = df["Signal"].iloc[-1]
+    if latest_signal == 1:
+        st.success("✅ SMA Recommendation: BUY")
     else:
-        final_label = 0
+        st.info("ℹ️ SMA Recommendation: SELL / HOLD")
 
-    st.subheader("Recommendation")
-    colA, colB, colC = st.columns(3)
-    with colA:
-        st.metric("Model vote", recommendation_text(model_label))
-        st.write(pd.DataFrame({"SELL":[p_sell], "HOLD":[p_hold], "BUY":[p_buy]}).T.rename(columns={0:"Probability"}))
-    with colB:
-        st.metric("Rules vote", recommendation_text(rule_label))
-        st.write("Rules consider SMA stack, RSI, and MACD cross.")
-    with colC:
-        st.metric("Final suggestion", recommendation_text(final_label))
+    # ---------- Monte Carlo Simulation ----------
+    returns = df["Close"].pct_change().dropna()
+    mu = float(returns.mean())
+    sigma = float(returns.std())
+    S0 = float(df["Close"].iloc[-1])
 
-    if final_label == 1:
-        st.success("👉 Suggestion: BUY (based on model + rules)")
-    elif final_label == -1:
-        st.error("👉 Suggestion: SELL (based on model + rules)")
+    simulations = np.zeros((horizon_days, num_simulations))
+    simulations[0, :] = S0 * (1 + np.random.normal(mu, sigma, num_simulations))
+
+    for t in range(1, horizon_days):
+        simulations[t, :] = simulations[t-1, :] * (1 + np.random.normal(mu, sigma, num_simulations))
+
+    final_prices = simulations[-1, :]
+    prob_up = (final_prices > S0).mean()
+    avg_return = (final_prices / S0 - 1).mean()
+
+    if prob_up > 0.55:
+        mc_recommendation = "BUY"
+    elif prob_up < 0.45:
+        mc_recommendation = "SELL"
     else:
-        st.info("👉 Suggestion: HOLD (based on model + rules)")
+        mc_recommendation = "HOLD"
 
-    st.subheader("Feature snapshot")
-    st.dataframe(latest_row.T.rename(columns={latest_row.index[-1]:"Latest"}))
+    # ---------- Plot simplified Monte Carlo ----------
+    fig2, ax2 = plt.subplots(figsize=(10,5))
+    ax2.plot(simulations[:, :500], color="lightblue", alpha=0.1)
+    ax2.set_title(f"Monte Carlo Simulation ({num_simulations} sims, {horizon_days} days ahead)")
+    ax2.set_xlabel("Days")
+    ax2.set_ylabel("Price ($)")
+    st.pyplot(fig2)
 
-    st.divider()
-    st.caption("This tool is for educational purposes only. It is not financial advice. Do your own research.")
+    st.subheader("Monte Carlo Results")
+    st.metric("Recommendation", mc_recommendation)
+    st.write(f"Chance of going up: {prob_up*100:.2f}%")
+    st.write(f"Expected average return: {avg_return*100:.2f}%")
