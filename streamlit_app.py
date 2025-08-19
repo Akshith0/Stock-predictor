@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import date, timedelta
 
-st.set_page_config(page_title="Stock Predictor", layout="wide")
+st.set_page_config(page_title="WGIC Stock Simulator", layout="wide")
 st.title("📈 Stock Predictor & Monte Carlo Simulation")
 
 # ---------- Ticker selection ----------
