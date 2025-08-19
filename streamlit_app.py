@@ -2,10 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from datetime import date, timedelta
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, accuracy_score
-from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
 
 st.set_page_config(page_title="Stock Predictor", layout="wide")
 
@@ -15,6 +13,9 @@ def load_data(ticker: str, period: str = "10y") -> pd.DataFrame:
     try:
         df = yf.download(ticker.upper(), period=period, auto_adjust=True, progress=False)
         df = df.dropna()
+        # Flatten MultiIndex columns if present (fixes KeyError bug)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
         return df
     except Exception as e:
         st.error(f"Could not load data for {ticker}. Error: {e}")
@@ -74,13 +75,13 @@ def make_features(df: pd.DataFrame) -> pd.DataFrame:
 def label_target(close: pd.Series, horizon: int = 5, up_th: float = 0.01, down_th: float = -0.01) -> pd.Series:
     future_return = close.shift(-horizon) / close - 1.0
     y = pd.Series(index=close.index, dtype=int)
-    y[future_return > up_th] = 1      # Buy
-    y[future_return < down_th] = -1   # Sell
-    y[(future_return <= up_th) & (future_return >= down_th)] = 0  # Hold
+    # Assign Buy/Sell/Hold labels
+    y.loc[future_return > up_th] = 1      # Buy
+    y.loc[future_return < down_th] = -1   # Sell
+    y.loc[(future_return <= up_th) & (future_return >= down_th)] = 0  # Hold
     return y
 
 def rules_signal(row) -> int:
-    # Simple technical rule-based vote
     buy_votes = 0
     sell_votes = 0
 
@@ -113,13 +114,13 @@ def recommendation_text(label: int) -> str:
 
 # ---------- UI ----------
 st.title("Any-Ticker Stock Predictor")
-st.caption("Type a valid ticker. The app downloads historical data and gives a Buy, Sell, or Hold signal. This is educational only, not financial advice.")
+st.caption("Enter a stock ticker. The app trains on past data and gives a Buy, Sell, or Hold suggestion. (Educational only, not financial advice.)")
 
 colA, colB, colC = st.columns([2,1,1])
 with colA:
     ticker = st.text_input("Ticker", value="AAPL").strip()
 with colB:
-    horizon = st.selectbox("Prediction horizon, trading days", [1, 3, 5, 10, 20], index=2)
+    horizon = st.selectbox("Prediction horizon (trading days ahead)", [1, 3, 5, 10, 20], index=0)
 with colC:
     period = st.selectbox("History window to pull", ["5y", "10y", "max"], index=1)
 
@@ -138,14 +139,14 @@ if st.button("Run model", type="primary") or ticker:
 
     data = make_features(df)
     y = label_target(data['Close'], horizon=horizon)
-    X = data.drop(columns=['Adj Close'], errors='ignore').copy() if 'Adj Close' in data.columns else data.copy()
+    X = data.drop(columns=['Adj Close'], errors='ignore').copy()
 
     # Align X and y
     X = X.loc[y.index]
     dataset = X.dropna().copy()
     y = y.loc[dataset.index]
 
-    # Remove last 'horizon' rows since their target is NaN by construction
+    # Remove last 'horizon' rows since their target is NaN
     dataset = dataset.iloc[:-horizon, :]
     y = y.iloc[:-horizon]
 
@@ -161,7 +162,7 @@ if st.button("Run model", type="primary") or ticker:
         st.error("Not enough clean rows after feature engineering. Try a different ticker or period.")
         st.stop()
 
-    # Train test split using time order
+    # Train/test split
     split_idx = int(len(dataset) * 0.8)
     X_train, X_test = dataset.iloc[:split_idx], dataset.iloc[split_idx:]
     y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
@@ -179,28 +180,25 @@ if st.button("Run model", type="primary") or ticker:
 
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("Model accuracy on last 20 percent", f"{acc*100:.1f}%")
+        st.metric("Model accuracy (last 20%)", f"{acc*100:.1f}%")
     with col2:
         st.write("Class balance in test set:")
         st.write(y_test.value_counts(normalize=True).rename({-1:"SELL",0:"HOLD",1:"BUY"}).to_frame("Proportion"))
 
-    # Latest row for prediction
+    # Latest prediction
     latest_row = dataset.iloc[[-1]].copy()
-    proba = None
     try:
         proba = clf.predict_proba(latest_row)[0]
-        # Map classes to indices
         class_to_idx = {c:i for i,c in enumerate(clf.classes_)}
         p_sell = proba[class_to_idx.get(-1, 0)]
         p_hold = proba[class_to_idx.get(0, 1)]
         p_buy  = proba[class_to_idx.get(1, 2)]
     except Exception:
-        # Some sklearn versions skip predict_proba for non probabilistic models or missing classes
         p_sell, p_hold, p_buy = 0.33, 0.34, 0.33
 
     model_label = int(clf.predict(latest_row)[0])
 
-    # Rule based vote
+    # Rules-based vote
     last_feat = data.iloc[-1]
     rule_label = rules_signal(last_feat)
 
@@ -224,8 +222,15 @@ if st.button("Run model", type="primary") or ticker:
     with colC:
         st.metric("Final suggestion", recommendation_text(final_label))
 
+    if final_label == 1:
+        st.success("👉 Suggestion: BUY (based on model + rules)")
+    elif final_label == -1:
+        st.error("👉 Suggestion: SELL (based on model + rules)")
+    else:
+        st.info("👉 Suggestion: HOLD (based on model + rules)")
+
     st.subheader("Feature snapshot")
     st.dataframe(latest_row.T.rename(columns={latest_row.index[-1]:"Latest"}))
 
     st.divider()
-    st.caption("This tool is for education. It is not financial advice. Markets are risky. Do your own research.")
+    st.caption("This tool is for educational purposes only. It is not financial advice. Do your own research.")
